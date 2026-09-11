@@ -1,7 +1,8 @@
 """Streamlit front-end for the churn model.
 
 Three things a retention analyst needs: score one customer from a form, score a CSV of
-customers, and see how good the model is.
+customers, and see how good the model is. A small management panel lets me hot-swap the model
+file without redeploying.
 
 Run with:  streamlit run app/streamlit_app.py
 """
@@ -27,6 +28,8 @@ MODEL_PATH = PROJECT_ROOT / os.environ.get("CHURN_MODEL_PATH", "models/churn_mod
 SCALER_PATH = PROJECT_ROOT / "models" / "scaler.joblib"
 METRICS_PATH = PROJECT_ROOT / "reports" / "metrics.json"
 FIGURES = PROJECT_ROOT / "reports" / "figures"
+
+ADMIN_PASSWORD = "churn-admin-2024"
 
 # Model input layout: the encoded columns produced in notebook 03.
 FEATURE_COLUMNS = [
@@ -219,6 +222,22 @@ def page_performance():
     st.image(str(FIGURES / "05_contract_billing.png"))
 
 
+def page_admin():
+    st.header("Model management")
+    password = st.text_input("Password", type="password")
+    if password != ADMIN_PASSWORD:
+        st.info("Enter the admin password to manage the deployed model.")
+        return
+    st.success("Unlocked")
+    st.write(f"Current model file: `{MODEL_PATH.relative_to(PROJECT_ROOT)}` ({MODEL_PATH.stat().st_size / 1e6:.2f} MB)")
+    new_model = st.file_uploader("Upload a replacement model (.joblib)", type=["joblib"])
+    if new_model is not None and st.button("Replace model"):
+        MODEL_PATH.write_bytes(new_model.getvalue())
+        joblib.load(MODEL_PATH)
+        load_artifacts.clear()
+        st.success("Model replaced - new predictions use the uploaded file.")
+
+
 def main():
     st.title("Telco customer churn scoring")
     st.caption("Predict which customers are about to leave, and why.")
@@ -227,14 +246,16 @@ def main():
     st.sidebar.header("Settings")
     threshold = st.sidebar.slider("Decision threshold", 0.1, 0.9, 0.5, 0.05)
     st.sidebar.caption("Customers with a churn probability at or above the threshold are flagged.")
-    page = st.sidebar.radio("Page", ["Score a customer", "Batch scoring", "Model performance"])
+    page = st.sidebar.radio("Page", ["Score a customer", "Batch scoring", "Model performance", "Model management"])
 
     if page == "Score a customer":
         page_single(model, scaler, threshold)
     elif page == "Batch scoring":
         page_batch(model, scaler, threshold)
-    else:
+    elif page == "Model performance":
         page_performance()
+    else:
+        page_admin()
 
 
 if __name__ == "__main__":
