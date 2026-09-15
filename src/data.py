@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -55,10 +56,24 @@ def load_raw(path: Path | str = RAW_PATH) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def parse_total_charges(s: pd.Series) -> pd.Series:
+    """TotalCharges arrives as text. Blank cells are a single space, which pandas does not
+    count as missing, so strip first and turn the empties into real NaNs."""
+    return pd.to_numeric(s.astype(str).str.strip().replace("", np.nan), errors="coerce")
+
+
+def missing_total_charges(df: pd.DataFrame) -> pd.DataFrame:
+    """The raw rows whose TotalCharges cannot be parsed - worth looking at before cleaning."""
+    return df[parse_total_charges(df["TotalCharges"]).isna()]
+
+
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     """Return a tidy copy of the raw frame.
 
-    * TotalCharges is parsed to float.
+    * TotalCharges is parsed to float. Customers in their first month (tenure 0) have not
+      been billed yet and arrive with a blank TotalCharges; those become 0. A blank on a
+      customer with tenure > 0 is a genuine gap and is left as NaN so it cannot slip through
+      unnoticed.
     * SeniorCitizen becomes Yes/No like every other flag column.
     * "No internet service" / "No phone service" collapse to "No" - they carry no extra
       information once InternetService / PhoneService are known.
@@ -66,7 +81,9 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
 
-    out["TotalCharges"] = pd.to_numeric(out["TotalCharges"], errors="coerce").fillna(0.0)
+    out["TotalCharges"] = parse_total_charges(out["TotalCharges"])
+    first_month = out["tenure"].eq(0) & out["TotalCharges"].isna()
+    out.loc[first_month, "TotalCharges"] = 0.0
 
     out["SeniorCitizen"] = out["SeniorCitizen"].map({0: "No", 1: "Yes"})
 

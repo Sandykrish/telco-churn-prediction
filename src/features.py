@@ -26,13 +26,17 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add the derived columns I use on top of the raw ones.
 
     avg_monthly_charge  what the customer actually paid per month over their tenure
+                        (first-month customers have no history yet, so it is their
+                        current monthly price)
     charge_ratio        current monthly price relative to that average (price creep)
     num_services        how many add-on services are switched on
     tenure_group        coarse tenure buckets for the EDA and for tree splits
     """
     out = df.copy()
-    tenure = out["tenure"].replace(0, 1)
-    out["avg_monthly_charge"] = out["TotalCharges"] / tenure
+    has_history = out["tenure"] > 0
+    out["avg_monthly_charge"] = np.where(
+        has_history, out["TotalCharges"] / out["tenure"].where(has_history, 1), out["MonthlyCharges"]
+    )
     out["charge_ratio"] = out["MonthlyCharges"] / out["avg_monthly_charge"].replace(0, np.nan)
     out["charge_ratio"] = out["charge_ratio"].fillna(1.0)
     out["num_services"] = (out[_ADDON_SERVICES] == "Yes").sum(axis=1)
