@@ -1,13 +1,21 @@
-"""Feature engineering: derived columns, encoding and scaling."""
+"""Feature engineering: derived columns plus the encoding/scaling preprocessor.
+
+`add_features` is a plain row-wise transformation with no fitted state, so it is safe to
+apply to the whole dataset. Everything that *learns* from the data (scaler statistics,
+one-hot categories) lives in the ColumnTransformer from `build_preprocessor`, which is fit
+on the training split only and saved with the model.
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from src.data import NUMERIC_COLUMNS
+from src.data import CATEGORICAL_COLUMNS, NUMERIC_COLUMNS
 
 ENGINEERED_NUMERIC = ["avg_monthly_charge", "num_services", "charge_ratio"]
+ENGINEERED_CATEGORICAL = ["tenure_group"]
 
 TENURE_BINS = [-1, 12, 24, 48, 72]
 TENURE_LABELS = ["0-12", "13-24", "25-48", "49-72"]
@@ -44,18 +52,31 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def encode_and_scale(df: pd.DataFrame) -> tuple[pd.DataFrame, StandardScaler]:
-    """One-hot encode the categoricals and standardise the numeric columns.
+def numeric_features() -> list[str]:
+    return NUMERIC_COLUMNS + ENGINEERED_NUMERIC
 
-    Returns the model-ready matrix (as a DataFrame so the column names survive) and
-    the fitted scaler so the app can reuse it.
+
+def categorical_features() -> list[str]:
+    return CATEGORICAL_COLUMNS + ENGINEERED_CATEGORICAL
+
+
+def build_preprocessor() -> ColumnTransformer:
+    """Unfitted encoder + scaler.
+
+    Numeric columns are standardised; categoricals are one-hot encoded with the first level
+    dropped (so `Contract` becomes `Contract_One year` / `Contract_Two year`). Unknown levels
+    at scoring time encode as all-zeros instead of raising, which matters for the batch
+    upload in the app. Fit it on the training rows only.
     """
-    numeric = NUMERIC_COLUMNS + ENGINEERED_NUMERIC
-    scaler = StandardScaler()
-    scaled = pd.DataFrame(scaler.fit_transform(df[numeric]), columns=numeric, index=df.index)
+    return ColumnTransformer(
+        [
+            ("num", StandardScaler(), numeric_features()),
+            ("cat", OneHotEncoder(drop="first", handle_unknown="ignore", sparse_output=False, dtype=int), categorical_features()),
+        ],
+        verbose_feature_names_out=False,
+    ).set_output(transform="pandas")
 
-    categorical = [c for c in df.columns if c not in numeric]
-    dummies = pd.get_dummies(df[categorical], drop_first=True, dtype=int)
 
-    X = pd.concat([scaled, dummies], axis=1)
-    return X, scaler
+def feature_names(preprocessor: ColumnTransformer) -> list[str]:
+    """Column names of the matrix a fitted preprocessor produces, in order."""
+    return preprocessor.get_feature_names_out().tolist()
