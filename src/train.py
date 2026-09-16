@@ -1,15 +1,24 @@
-"""Model zoo, cross-validated comparison and hyperparameter tuning."""
+"""Model zoo, cross-validated comparison and hyperparameter tuning.
+
+Every estimator is wrapped in an imbalanced-learn pipeline
+``preprocessor -> SMOTE -> classifier`` so that, inside cross-validation, the scaler and
+encoder are fit and the synthetic churners are generated from the training folds only.
+The test split never sees any of it until the final scoring pass.
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline
 from lightgbm import LGBMClassifier
 from sklearn.base import BaseEstimator, clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import ParameterSampler, StratifiedKFold, cross_validate
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_validate
 from xgboost import XGBClassifier
+
+from src.features import build_preprocessor
 
 RANDOM_STATE = 42
 
@@ -54,8 +63,8 @@ def get_models(random_state: int = RANDOM_STATE) -> dict[str, BaseEstimator]:
 
 
 def param_grids() -> dict[str, dict]:
-    """Search spaces for the tuning step."""
-    return {
+    """Search spaces for the tuning step, keyed for the ``clf`` step of the pipeline."""
+    grids = {
         "Logistic Regression": {
             "C": np.logspace(-2, 1.5, 12),
             "class_weight": [None, "balanced"],
@@ -83,6 +92,19 @@ def param_grids() -> dict[str, dict]:
             "colsample_bytree": [0.6, 0.8, 1.0],
         },
     }
+    return {name: {f"clf__{k}": v for k, v in grid.items()} for name, grid in grids.items()}
+
+
+def make_pipeline(model: BaseEstimator, random_state: int = RANDOM_STATE) -> Pipeline:
+    """preprocessor -> SMOTE -> model. SMOTE is a sampler step, so it only acts during
+    ``fit``; ``predict`` / ``predict_proba`` go straight from the preprocessor to the model."""
+    return Pipeline(
+        [
+            ("prep", build_preprocessor()),
+            ("smote", SMOTE(random_state=random_state)),
+            ("clf", clone(model)),
+        ]
+    )
 
 
 def make_cv(n_splits: int = 5, random_state: int = RANDOM_STATE) -> StratifiedKFold:
@@ -95,12 +117,12 @@ def compare_models(
     y: pd.Series,
     cv: StratifiedKFold | None = None,
 ) -> pd.DataFrame:
-    """Stratified k-fold comparison. Returns one row per model with mean and std of
-    every metric in SCORING (accuracy, precision, recall, f1, roc_auc)."""
+    """Stratified k-fold comparison of the full pipelines. Returns one row per model
+    with mean and std of every metric in SCORING (accuracy, precision, recall, f1, roc_auc)."""
     cv = cv or make_cv()
     rows = []
     for name, model in models.items():
-        result = cross_validate(model, X, y, cv=cv, scoring=SCORING, n_jobs=1)
+        result = cross_validate(make_pipeline(model), X, y, cv=cv, scoring=SCORING, n_jobs=1)
         row = {"model": name}
         for metric in SCORING:
             scores = result[f"test_{metric}"]
@@ -112,33 +134,32 @@ def compare_models(
 
 
 def tune_model(
-    estimator: BaseEstimator,
+    model: BaseEstimator,
     param_grid: dict,
     X_train: pd.DataFrame,
     y_train: pd.Series,
-    X_eval: pd.DataFrame,
-    y_eval: pd.Series,
+    cv: StratifiedKFold | None = None,
     n_iter: int = 20,
+    scoring: str = "roc_auc",
     random_state: int = RANDOM_STATE,
-) -> tuple[BaseEstimator, pd.DataFrame]:
-    """Random search over ``param_grid``.
+) -> tuple[Pipeline, pd.DataFrame]:
+    """Random search over ``param_grid`` using cross-validation on the training split.
 
-    Each candidate is fitted on the training data and scored by ROC-AUC on the
-    held-out data; the best-scoring candidate is refitted and returned together
-    with the full search log.
+    Returns the pipeline refitted on all training rows with the best parameters, and the
+    search log sorted by mean CV score.
     """
-    sampler = ParameterSampler(param_grid, n_iter=n_iter, random_state=random_state)
-    log = []
-    candidates = []
-    for i, params in enumerate(sampler):
-        candidate = clone(estimator).set_params(**params)
-        candidate.fit(X_train, y_train)
-        auc = roc_auc_score(y_eval, candidate.predict_proba(X_eval)[:, 1])
-        log.append({"iter": i, "roc_auc": auc, **params})
-        candidates.append((auc, params))
-
-    log_df = pd.DataFrame(log).sort_values("roc_auc", ascending=False).reset_index(drop=True)
-    best_params = max(candidates, key=lambda c: c[0])[1]
-    best = clone(estimator).set_params(**best_params)
-    best.fit(X_train, y_train)
-    return best, log_df
+    search = RandomizedSearchCV(
+        make_pipeline(model),
+        param_grid,
+        n_iter=n_iter,
+        scoring=scoring,
+        cv=cv or make_cv(),
+        random_state=random_state,
+        n_jobs=1,
+        refit=True,
+    )
+    search.fit(X_train, y_train)
+    log = pd.DataFrame(search.cv_results_)
+    keep = ["mean_test_score", "std_test_score", "mean_fit_time"] + [c for c in log.columns if c.startswith("param_")]
+    log = log[keep].rename(columns=lambda c: c.replace("param_clf__", "")).sort_values("mean_test_score", ascending=False)
+    return search.best_estimator_, log.reset_index(drop=True)
