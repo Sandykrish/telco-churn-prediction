@@ -21,48 +21,14 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import NUMERIC_COLUMNS, clean  # noqa: E402
-from src.features import ENGINEERED_NUMERIC, add_features  # noqa: E402
+from src.data import clean  # noqa: E402
+from src.features import add_features  # noqa: E402
 
-MODEL_PATH = PROJECT_ROOT / os.environ.get("CHURN_MODEL_PATH", "models/churn_model.joblib")
-SCALER_PATH = PROJECT_ROOT / "models" / "scaler.joblib"
+MODEL_PATH = PROJECT_ROOT / os.environ.get("CHURN_MODEL_PATH", "models/churn_pipeline.joblib")
 METRICS_PATH = PROJECT_ROOT / "reports" / "metrics.json"
 FIGURES = PROJECT_ROOT / "reports" / "figures"
 
 ADMIN_PASSWORD = "churn-admin-2024"
-
-# Model input layout: the encoded columns produced in notebook 03.
-FEATURE_COLUMNS = [
-    "Contract_One year",
-    "Contract_Two year",
-    "Dependents_Yes",
-    "DeviceProtection_Yes",
-    "InternetService_Fiber optic",
-    "InternetService_No",
-    "MonthlyCharges",
-    "MultipleLines_Yes",
-    "OnlineBackup_Yes",
-    "OnlineSecurity_Yes",
-    "PaperlessBilling_Yes",
-    "Partner_Yes",
-    "PaymentMethod_Credit card (automatic)",
-    "PaymentMethod_Electronic check",
-    "PaymentMethod_Mailed check",
-    "PhoneService_Yes",
-    "SeniorCitizen_Yes",
-    "StreamingMovies_Yes",
-    "StreamingTV_Yes",
-    "TechSupport_Yes",
-    "TotalCharges",
-    "avg_monthly_charge",
-    "charge_ratio",
-    "gender_Male",
-    "num_services",
-    "tenure",
-    "tenure_group_13-24",
-    "tenure_group_25-48",
-    "tenure_group_49-72",
-]
 
 YES_NO = ["No", "Yes"]
 
@@ -70,23 +36,15 @@ st.set_page_config(page_title="Telco churn scoring", page_icon=":telephone_recei
 
 
 @st.cache_resource
-def load_artifacts():
-    model = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return model, scaler
+def load_pipeline():
+    """The saved pipeline carries its own fitted preprocessor, so the app never has to
+    know which encoded columns the model expects or in what order."""
+    return joblib.load(MODEL_PATH)
 
 
-def encode_rows(df: pd.DataFrame, scaler) -> np.ndarray:
-    """Apply the notebook-03 transformation to raw customer rows and return the matrix
-    the model expects."""
-    fe = add_features(df)
-    numeric = NUMERIC_COLUMNS + ENGINEERED_NUMERIC
-    scaled = pd.DataFrame(scaler.transform(fe[numeric]), columns=numeric, index=fe.index)
-    categorical = [c for c in fe.columns if c not in numeric]
-    dummies = pd.get_dummies(fe[categorical], dtype=int)
-    encoded = pd.concat([scaled, dummies], axis=1)
-    encoded = encoded.reindex(columns=FEATURE_COLUMNS, fill_value=0)
-    return encoded.values
+def churn_probability(pipeline, raw_rows: pd.DataFrame) -> np.ndarray:
+    """Raw customer rows -> probability of churn (the positive class)."""
+    return pipeline.predict_proba(add_features(raw_rows))[:, 1]
 
 
 def customer_form() -> pd.DataFrame:
@@ -156,11 +114,11 @@ def risk_band(p: float) -> str:
     return "Low"
 
 
-def page_single(model, scaler, threshold: float):
+def page_single(pipeline, threshold: float):
     st.header("Score a customer")
     row = customer_form()
     if st.button("Predict churn", type="primary"):
-        proba = float(model.predict_proba(encode_rows(row, scaler))[0][1])
+        proba = float(churn_probability(pipeline, row)[0])
         label = "likely to churn" if proba >= threshold else "likely to stay"
         m1, m2, m3 = st.columns(3)
         m1.metric("Churn probability", f"{proba:.1%}")
@@ -171,7 +129,7 @@ def page_single(model, scaler, threshold: float):
             st.dataframe(row.T.rename(columns={0: "value"}).astype(str), use_container_width=True)
 
 
-def page_batch(model, scaler, threshold: float):
+def page_batch(pipeline, threshold: float):
     st.header("Batch scoring")
     st.write(
         "Upload a CSV with the same columns as the raw Telco file (a `customerID` column is "
@@ -183,7 +141,7 @@ def page_batch(model, scaler, threshold: float):
     raw = pd.read_csv(uploaded)
     ids = raw["customerID"] if "customerID" in raw.columns else pd.Series(range(len(raw)), name="row")
     df = clean(raw).drop(columns=[c for c in ("customerID", "Churn") if c in raw.columns])
-    proba = model.predict_proba(encode_rows(df, scaler))[:, 0]
+    proba = pipeline.predict_proba(add_features(df))[:, 0]
     scored = pd.DataFrame(
         {
             "customerID": ids.values,
@@ -234,14 +192,14 @@ def page_admin():
     if new_model is not None and st.button("Replace model"):
         MODEL_PATH.write_bytes(new_model.getvalue())
         joblib.load(MODEL_PATH)
-        load_artifacts.clear()
+        load_pipeline.clear()
         st.success("Model replaced - new predictions use the uploaded file.")
 
 
 def main():
     st.title("Telco customer churn scoring")
     st.caption("Predict which customers are about to leave, and why.")
-    model, scaler = load_artifacts()
+    pipeline = load_pipeline()
 
     st.sidebar.header("Settings")
     threshold = st.sidebar.slider("Decision threshold", 0.1, 0.9, 0.5, 0.05)
@@ -249,9 +207,9 @@ def main():
     page = st.sidebar.radio("Page", ["Score a customer", "Batch scoring", "Model performance", "Model management"])
 
     if page == "Score a customer":
-        page_single(model, scaler, threshold)
+        page_single(pipeline, threshold)
     elif page == "Batch scoring":
-        page_batch(model, scaler, threshold)
+        page_batch(pipeline, threshold)
     elif page == "Model performance":
         page_performance()
     else:
