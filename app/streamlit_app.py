@@ -1,7 +1,7 @@
 """Streamlit front-end for the churn model.
 
-Three things a retention analyst needs: score one customer from a form, score a CSV of
-customers, and see how good the model is. A small management panel lets me hot-swap the model
+Three things a retention analyst needs: score one customer from a form (and see which
+features drove the score), score a CSV of customers, and see how good the model is. A small management panel lets me hot-swap the model
 file without redeploying.
 
 Run with:  streamlit run app/streamlit_app.py
@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import joblib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -22,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data import clean  # noqa: E402
+from src.explain import contributions, make_explainer, top_drivers  # noqa: E402
 from src.features import add_features  # noqa: E402
 
 MODEL_PATH = PROJECT_ROOT / os.environ.get("CHURN_MODEL_PATH", "models/churn_pipeline.joblib")
@@ -42,9 +44,26 @@ def load_pipeline():
     return joblib.load(MODEL_PATH)
 
 
+@st.cache_resource
+def load_explainer():
+    return make_explainer(load_pipeline())
+
+
 def churn_probability(pipeline, raw_rows: pd.DataFrame) -> np.ndarray:
     """Raw customer rows -> probability of churn (the positive class)."""
     return pipeline.predict_proba(add_features(raw_rows))[:, 1]
+
+
+def contribution_chart(contrib: pd.Series, n: int = 8):
+    """Horizontal bars of the n largest SHAP contributions for one customer."""
+    top = contrib.reindex(contrib.abs().sort_values(ascending=False).index).head(n)[::-1]
+    fig, ax = plt.subplots(figsize=(6, 3.2))
+    ax.barh(top.index, top.values, color=["#d62728" if v > 0 else "#1f77b4" for v in top.values])
+    ax.axvline(0, color="black", lw=0.8)
+    ax.set_xlabel("contribution to churn probability")
+    ax.set_title("What drove this score (red pushes towards churn)")
+    fig.tight_layout()
+    return fig
 
 
 def customer_form() -> pd.DataFrame:
@@ -125,6 +144,8 @@ def page_single(pipeline, threshold: float):
         m2.metric("Decision", label)
         m3.metric("Risk band", risk_band(proba))
         st.progress(min(max(proba, 0.0), 1.0))
+        contrib = contributions(pipeline, load_explainer(), row).iloc[0]
+        st.pyplot(contribution_chart(contrib), use_container_width=False)
         with st.expander("Customer record sent to the model"):
             st.dataframe(row.T.rename(columns={0: "value"}).astype(str), use_container_width=True)
 
@@ -142,16 +163,19 @@ def page_batch(pipeline, threshold: float):
     ids = raw["customerID"] if "customerID" in raw.columns else pd.Series(range(len(raw)), name="row")
     df = clean(raw).drop(columns=[c for c in ("customerID", "Churn") if c in raw.columns])
     proba = churn_probability(pipeline, df)
+    contrib = contributions(pipeline, load_explainer(), df)
     scored = pd.DataFrame(
         {
             "customerID": ids.values,
             "churn_probability": np.round(proba, 4),
             "prediction": np.where(proba >= threshold, "Churn", "Stay"),
             "risk_band": [risk_band(p) for p in proba],
+            "top_drivers": [top_drivers(r) for _, r in contrib.iterrows()],
         }
     ).sort_values("churn_probability", ascending=False)
     st.success(f"Scored {len(scored)} customers - {int((scored['prediction'] == 'Churn').sum())} flagged at threshold {threshold:.2f}")
-    st.dataframe(scored, use_container_width=True, height=400)
+    st.dataframe(scored, use_container_width=True, height=400, hide_index=True)
+    st.download_button("Download scored CSV", scored.to_csv(index=False), "scored_customers.csv", "text/csv")
 
 
 def page_performance():
