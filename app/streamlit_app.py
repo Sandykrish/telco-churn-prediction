@@ -8,6 +8,7 @@ Run with:  streamlit run app/streamlit_app.py
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -30,7 +31,9 @@ MODEL_PATH = PROJECT_ROOT / os.environ.get("CHURN_MODEL_PATH", "models/churn_pip
 METRICS_PATH = PROJECT_ROOT / "reports" / "metrics.json"
 FIGURES = PROJECT_ROOT / "reports" / "figures"
 
-ADMIN_PASSWORD = "churn-admin-2024"
+# Set CHURN_ADMIN_PASSWORD in the environment (see .env.example) to enable the management
+# page. There is deliberately no default: with it unset the page stays locked.
+ADMIN_PASSWORD = os.environ.get("CHURN_ADMIN_PASSWORD", "")
 
 YES_NO = ["No", "Yes"]
 
@@ -206,8 +209,11 @@ def page_performance():
 
 def page_admin():
     st.header("Model management")
+    if not ADMIN_PASSWORD:
+        st.warning("Model management is disabled: set CHURN_ADMIN_PASSWORD in the environment to enable it.")
+        return
     password = st.text_input("Password", type="password")
-    if password != ADMIN_PASSWORD:
+    if not hmac.compare_digest(password.encode(), ADMIN_PASSWORD.encode()):
         st.info("Enter the admin password to manage the deployed model.")
         return
     st.success("Unlocked")
