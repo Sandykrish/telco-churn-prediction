@@ -141,7 +141,7 @@ def page_batch(pipeline, threshold: float):
     raw = pd.read_csv(uploaded)
     ids = raw["customerID"] if "customerID" in raw.columns else pd.Series(range(len(raw)), name="row")
     df = clean(raw).drop(columns=[c for c in ("customerID", "Churn") if c in raw.columns])
-    proba = pipeline.predict_proba(add_features(df))[:, 0]
+    proba = churn_probability(pipeline, df)
     scored = pd.DataFrame(
         {
             "customerID": ids.values,
