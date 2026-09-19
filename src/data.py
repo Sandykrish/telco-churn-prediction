@@ -59,7 +59,8 @@ def load_raw(path: Path | str = RAW_PATH) -> pd.DataFrame:
 def parse_total_charges(s: pd.Series) -> pd.Series:
     """TotalCharges arrives as text. Blank cells are a single space, which pandas does not
     count as missing, so strip first and turn the empties into real NaNs."""
-    return pd.to_numeric(s.astype(str).str.strip().replace("", np.nan), errors="coerce")
+    stripped = s.astype(str).str.strip()
+    return pd.to_numeric(stripped.mask(stripped == "", np.nan), errors="coerce")
 
 
 def missing_total_charges(df: pd.DataFrame) -> pd.DataFrame:
