@@ -153,9 +153,12 @@ def page_single(pipeline, threshold: float):
         m3.metric("Risk band", risk_band(proba))
         st.progress(min(max(proba, 0.0), 1.0))
         contrib = contributions(pipeline, load_explainer(active_model_path()), row).iloc[0]
-        st.pyplot(contribution_chart(contrib), use_container_width=False)
-        with st.expander("Customer record sent to the model"):
-            st.dataframe(row.T.rename(columns={0: "value"}).astype(str), use_container_width=True)
+        left, right = st.columns([3, 2])
+        with left:
+            st.pyplot(contribution_chart(contrib), use_container_width=True)
+        with right:
+            with st.expander("Customer record sent to the model"):
+                st.dataframe(row.T.rename(columns={0: "value"}).astype(str), use_container_width=True)
 
 
 def page_batch(pipeline, threshold: float):
